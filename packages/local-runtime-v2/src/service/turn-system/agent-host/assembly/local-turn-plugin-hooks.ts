@@ -6,7 +6,12 @@ import {
   renderPluginHookRejectionReminder,
 } from '@mavis/plugin-hooks';
 import { buildRuntimeWarningEvent } from '@mavis/agent-core/event-bridge';
-import type { PiEventWriter, TurnEventReporter } from '@mavis/agent-core/pi-turn-runner';
+import type {
+  PiAfterLlmCallHook,
+  PiBeforeLlmCallHook,
+  PiEventWriter,
+  TurnEventReporter,
+} from '@mavis/agent-core/pi-turn-runner';
 import type {
   PluginHookAdmissionTransaction,
   PluginHookCommandHandler,
@@ -161,6 +166,112 @@ export async function emitLocalPluginHookWarnings(input: {
       // Warning delivery is best-effort and must not alter Hook control flow.
     }
   });
+}
+
+export function createLocalPluginPreLlmHook<TAgent extends AgentExecutionSnapshot>(
+  input: LocalTurnExecutionInput<TAgent>,
+): PiBeforeLlmCallHook | undefined {
+  const handlers = input.pluginHooks?.filter((handler) => handler.event === 'PreLLM') ?? [];
+  if (handlers.length === 0) return undefined;
+  return async (hookInput) => {
+    const result = await localPluginHookCoordinator.runEvent(
+      handlers,
+      {
+        event: 'PreLLM',
+        sessionId: input.lease.sessionId,
+        turnId: input.lease.turnId,
+        cwd: input.session.workspaceDir,
+        ...input.pluginHookRuntimeContext,
+        payload: {
+          phase: hookInput.phase,
+          messages: hookInput.messages,
+          system_prompt: hookInput.systemPrompt ?? '',
+          tools: hookInput.tools ?? [],
+          thinking_level: hookInput.thinkingLevel,
+          ...(hookInput.maxTokens === undefined ? {} : { max_tokens: hookInput.maxTokens }),
+        },
+      },
+      hookInput.signal ?? input.lease.signal,
+    );
+    await emitLocalPluginHookWarnings({
+      reporter: input.pluginHookEventReporter,
+      sessionId: input.lease.sessionId,
+      turnId: input.lease.turnId,
+      event: 'PreLLM',
+      result,
+    });
+    if (result.decision.continue === false) {
+      return {
+        type: 'abort',
+        reason: result.decision.stopReason ?? 'Provider request stopped by a PreLLM Plugin Hook.',
+      };
+    }
+    const keepMessageIndexes = result.decision.keepMessageIndexes;
+    if (keepMessageIndexes === undefined) return { type: 'continue' };
+    const messages = selectPluginPreLlmMessages(hookInput.messages, keepMessageIndexes);
+    if (
+      messages.length === hookInput.messages.length &&
+      messages.every((message, index) => message === hookInput.messages[index])
+    ) {
+      return { type: 'continue' };
+    }
+    return {
+      type: 'replaceRequestMessages',
+      messages,
+      reason: 'plugin-pre-llm-context-filter',
+    };
+  };
+}
+
+export function createLocalPluginPostLlmHook<TAgent extends AgentExecutionSnapshot>(
+  input: LocalTurnExecutionInput<TAgent>,
+): PiAfterLlmCallHook | undefined {
+  const handlers = input.pluginHooks?.filter((handler) => handler.event === 'PostLLM') ?? [];
+  if (handlers.length === 0) return undefined;
+  return async (hookInput) => {
+    const result = await localPluginHookCoordinator.runEvent(
+      handlers,
+      {
+        event: 'PostLLM',
+        sessionId: input.lease.sessionId,
+        turnId: input.lease.turnId,
+        cwd: input.session.workspaceDir,
+        ...input.pluginHookRuntimeContext,
+        payload: { message: hookInput.message },
+      },
+      hookInput.signal ?? input.lease.signal,
+    );
+    await emitLocalPluginHookWarnings({
+      reporter: input.pluginHookEventReporter,
+      sessionId: input.lease.sessionId,
+      turnId: input.lease.turnId,
+      event: 'PostLLM',
+      result,
+    });
+    return result.decision.continue === false
+      ? {
+          type: 'fail',
+          reason: result.decision.stopReason ?? 'Assistant response stopped by a PostLLM Plugin Hook.',
+        }
+      : { type: 'continue' };
+  };
+}
+
+function selectPluginPreLlmMessages(
+  messages: Parameters<PiBeforeLlmCallHook>[0]['messages'],
+  keepMessageIndexes: readonly number[],
+): Parameters<PiBeforeLlmCallHook>[0]['messages'] {
+  const keep = new Set(keepMessageIndexes);
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  const activeTailStart =
+    latestUserIndex >= 0 ? latestUserIndex : Math.max(0, messages.length - 1);
+  return messages.filter((_message, index) => index >= activeTailStart || keep.has(index));
 }
 
 function warningDedupeKey(

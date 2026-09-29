@@ -32,6 +32,48 @@ an existing Plugin with a `scripts/notice.cjs` file looks like this:
 The command requires Node.js on the Hook process's PATH. See [local Plugin
 management](examples.md#4-manage-plugins) for the active installation directory.
 
+## LLM lifecycle hooks
+
+MiniMax-format Plugins can also register `PreLLM` and `PostLLM` command Hooks.
+These events are MiniMax-native; Claude- and Codex-compatible Hook documents do
+not receive them.
+
+`PreLLM` runs after automatic context compaction and immediately before the
+remaining request-only Host reminders. Its stdin JSON includes the current
+provider-request `messages`, `phase`, `system_prompt`, `tools`,
+`thinking_level`, and optional `max_tokens`. Transport credentials such as
+API keys and request headers are never exposed.
+
+A `PreLLM` Hook may retain a subset of older request messages:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreLLM",
+    "keepMessageIndexes": [0, 3, 7]
+  }
+}
+```
+
+Indexes must be unique, strictly increasing, and valid for the supplied
+`messages` array. The Host always retains the newest user message and every
+message after it, regardless of the Hook output. The selection therefore cannot
+break the active turn's assistant/tool-result chain. It changes only the current
+provider request; canonical Session history is not rewritten. When several
+`PreLLM` Hooks return selections, their indexes are unioned so one Hook cannot
+remove context another Hook explicitly retained.
+
+`PreLLM` accepts up to 8 MiB of serialized stdin so long-running Sessions can
+be filtered before the provider call. Other Hook events keep the normal 1 MiB
+input bound.
+
+`PostLLM` runs after an assistant response is received and before any tool call
+in that response executes. Its stdin includes the assistant `message`. In the
+initial contract it is observation/control only: normal Hook fields such as
+`systemMessage` are supported, and returning `{"continue":false}` rejects the
+assistant response before pending tool calls can cause side effects. It cannot
+silently rewrite assistant text or tool calls.
+
 ## Display and model context
 
 On normal completion, a Stop notice appears after the response as `Hook · Stop`.
@@ -59,9 +101,9 @@ interactive TUI presentation; headless and ACP output policies are unchanged.
 ## Event limits
 
 The same display behavior applies where Runtime already emits notices:
-SessionStart/UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse,
-SubagentStart/SubagentStop and automatic PostCompact. A cancelled or failed turn
-does not fire the normal Stop Hook.
+SessionStart/UserPromptSubmit, PreLLM/PostLLM, PreToolUse, PermissionRequest,
+PostToolUse, SubagentStart/SubagentStop and automatic PostCompact. A cancelled or
+failed turn does not fire the normal Stop Hook.
 
 PreCompact and manual PostCompact do not currently emit these notices.
 SessionEnd delivery is best-effort and is not guaranteed to appear before exit.

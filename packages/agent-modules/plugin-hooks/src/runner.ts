@@ -29,6 +29,7 @@ import {
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
+const MAX_PRE_LLM_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_REASON_CHARS = 4_096;
 const MAX_INJECTED_TEXT_CHARS = 64 * 1024;
 const MAX_OUTPUT_VALUE_DEPTH = 64;
@@ -621,6 +622,9 @@ function parseWireDecision(
     return base;
   }
 
+  if (event === 'PreLLM') {
+    return parsePreLlmOutput(base, specific, input);
+  }
   if (event === 'PermissionRequest') {
     return parsePermissionRequestOutput(base, specific, handler, input);
   }
@@ -736,6 +740,42 @@ function mergeExitTwoDecision(
     };
   }
   return mergePluginHookDecisions(parsed, exitDecision);
+}
+
+function parsePreLlmOutput(
+  base: PluginHookDecision,
+  specific: Record<string, unknown> | undefined,
+  input: PluginHookEventInput,
+): PluginHookDecision | undefined {
+  if (!specific) return base;
+  if (
+    Object.keys(specific).some(
+      (key) => key !== 'hookEventName' && key !== 'keepMessageIndexes',
+    )
+  ) {
+    return undefined;
+  }
+  if (specific.keepMessageIndexes === undefined) return base;
+  if (!Array.isArray(specific.keepMessageIndexes) || !Array.isArray(input.payload?.messages)) {
+    return undefined;
+  }
+  const messageCount = input.payload.messages.length;
+  const indexes: number[] = [];
+  let previous = -1;
+  for (const value of specific.keepMessageIndexes) {
+    if (
+      typeof value !== 'number' ||
+      !Number.isSafeInteger(value) ||
+      value < 0 ||
+      value >= messageCount ||
+      value <= previous
+    ) {
+      return undefined;
+    }
+    indexes.push(value);
+    previous = value;
+  }
+  return { ...base, keepMessageIndexes: indexes };
 }
 
 function parsePermissionRequestOutput(
@@ -1379,6 +1419,10 @@ function allowedWireOutputKeys(
       return new Set([...common, 'hookSpecificOutput']);
     case 'UserPromptSubmit':
       return new Set([...common, 'decision', 'reason', 'hookSpecificOutput']);
+    case 'PreLLM':
+      return new Set([...common, 'hookSpecificOutput']);
+    case 'PostLLM':
+      return new Set(common);
     case 'PreToolUse':
       return new Set([...common, 'decision', 'reason', 'hookSpecificOutput']);
     case 'PermissionRequest':
@@ -1519,6 +1563,16 @@ export function mergePluginHookDecisions(
     ...((next.postToolFeedback ?? current.postToolFeedback)
       ? {
           postToolFeedback: mergePluginHookContext(current.postToolFeedback, next.postToolFeedback),
+        }
+      : {}),
+    ...(current.keepMessageIndexes || next.keepMessageIndexes
+      ? {
+          keepMessageIndexes: [
+            ...new Set([
+              ...(current.keepMessageIndexes ?? []),
+              ...(next.keepMessageIndexes ?? []),
+            ]),
+          ].sort((left, right) => left - right),
         }
       : {}),
     ...(current.interrupt === true || next.interrupt === true ? { interrupt: true } : {}),
@@ -1699,7 +1753,8 @@ function serializeHookInput(input: PluginHookEventInput): string | undefined {
       ...(input.permissionMode ? { permission_mode: input.permissionMode } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
     });
-    return Buffer.byteLength(serialized) <= MAX_INPUT_BYTES ? serialized : undefined;
+    const inputLimit = input.event === 'PreLLM' ? MAX_PRE_LLM_INPUT_BYTES : MAX_INPUT_BYTES;
+    return Buffer.byteLength(serialized) <= inputLimit ? serialized : undefined;
   } catch {
     return undefined;
   }
@@ -1740,6 +1795,10 @@ function isValidWireInput(handler: PluginHookCommandHandler, input: PluginHookEv
       return has('reason');
     case 'UserPromptSubmit':
       return has('prompt');
+    case 'PreLLM':
+      return has('phase') && has('messages');
+    case 'PostLLM':
+      return has('message');
     case 'PreToolUse':
       return has('tool_name') && has('tool_input') && has('tool_use_id');
     case 'PermissionRequest':
@@ -1944,6 +2003,16 @@ function adaptVendorInput(
       ...common,
       matcherValue: reason,
       payload: pickVendorPayload({ ...payload, reason }, ['reason']),
+    };
+  }
+  if (input.event === 'PreLLM' || input.event === 'PostLLM') {
+    const keys =
+      input.event === 'PreLLM'
+        ? (['phase', 'messages', 'system_prompt', 'tools', 'thinking_level', 'max_tokens'] as const)
+        : (['message'] as const);
+    return {
+      ...common,
+      payload: pickVendorPayload(payload, keys),
     };
   }
   if (
@@ -2200,6 +2269,12 @@ function isEventSupportedBySource(
   handler: PluginHookCommandHandler,
   input: PluginHookEventInput,
 ): boolean {
+  if (
+    (input.event === 'PreLLM' || input.event === 'PostLLM') &&
+    handler.sourceFormat !== 'MINIMAX'
+  ) {
+    return false;
+  }
   if (
     input.event === 'PostToolUse' &&
     handler.sourceFormat === 'CODEX' &&

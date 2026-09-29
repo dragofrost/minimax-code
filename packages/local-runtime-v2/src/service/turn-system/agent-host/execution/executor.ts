@@ -21,6 +21,8 @@ import { buildCompletedTerminalStatusEvent } from '@mavis/agent-core/event-bridg
 import {
   beginLocalPluginHookTurn,
   createLocalPluginHookEventReporter,
+  createLocalPluginPostLlmHook,
+  createLocalPluginPreLlmHook,
   emitLocalPluginHookWarnings,
   localPluginHookCoordinator as pluginHookCoordinator,
 } from '../assembly/local-turn-plugin-hooks.js';
@@ -604,12 +606,14 @@ export class LocalRuntimeTurnExecutor<
     input: LocalTurnExecutionInput<TAgent>,
     afterCompactionHooks: readonly PiBeforeLlmCallHook[] = [],
   ): Promise<readonly PiBeforeLlmCallHook[]> {
+    const pluginPreLlmHook = createLocalPluginPreLlmHook(input);
     return [
       ...((await this.options.resolveBeforeLlmCallHooks?.(input)) ?? []),
       createLocalCuScreenshotPruner(2),
       ...(input.contextCompactionHook
         ? [withPluginAutomaticCompactionLifecycle(input.contextCompactionHook, input)]
         : []),
+      ...(pluginPreLlmHook ? [pluginPreLlmHook] : []),
       ...afterCompactionHooks,
       ...(this.options.afterCompactionBeforeLlmCallHooks ?? []),
     ];
@@ -843,12 +847,17 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolPolicyGuard,
     finalizeToolResultForHistory,
   });
+  const pluginPostLlmHook = createLocalPluginPostLlmHook(input);
   return {
     ...input.assembly.hooks,
     ...toolHooks,
     beforeLlmCallHook: [
       ...(input.assembly.hooks.beforeLlmCallHook ?? []),
       ...hostBeforeLlmCallHooks,
+    ],
+    afterLlmCallHook: [
+      ...(input.assembly.hooks.afterLlmCallHook ?? []),
+      ...(pluginPostLlmHook ? [pluginPostLlmHook] : []),
     ],
     onHistoryChangedHook: [
       async (change) => {
