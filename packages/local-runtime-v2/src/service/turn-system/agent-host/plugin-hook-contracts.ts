@@ -9,6 +9,8 @@ export interface AgentHostPluginHookHandler {
     | 'SessionStart'
     | 'SessionEnd'
     | 'UserPromptSubmit'
+    | 'PreLLM'
+    | 'PostLLM'
     | 'PreToolUse'
     | 'PermissionRequest'
     | 'PostToolUse'

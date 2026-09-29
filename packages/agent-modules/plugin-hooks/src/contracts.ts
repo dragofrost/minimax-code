@@ -3,6 +3,8 @@ export const PLUGIN_HOOK_EVENTS = [
   'SessionStart',
   'SessionEnd',
   'UserPromptSubmit',
+  'PreLLM',
+  'PostLLM',
   'PreToolUse',
   'PermissionRequest',
   'PostToolUse',
@@ -184,6 +186,8 @@ export interface PluginHookDecision {
   readonly terminalSequence?: string;
   /** Codex PostToolUse error feedback for the next model step; never an agent hard stop. */
   readonly postToolFeedback?: string;
+  /** PreLLM-only allowlist of request-message indexes to retain from the pre-current-turn history. */
+  readonly keepMessageIndexes?: readonly number[];
   /** Replacement for the model-visible tool result; audit/persistence keeps the original result. */
   readonly updatedResult?: unknown;
   /** Vendor contract that owns `updatedResult`; hosts use its native serializer. */
